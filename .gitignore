@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Data files (optional - uncomment if you want to exclude)
+# trades.csv
+# funds_transactions.csv
+# account_summary.csv
+# pledges.csv
+
+# PDFs
+pdfs/
+
+# Sensitive files - NEVER commit these!
+config.py
+credentials.py
+.env
+.env.local
+secrets.json
+
+# Batch files (may contain paths)
+*.bat
+
+# PowerShell scripts (may contain sensitive info)
+*.ps1
