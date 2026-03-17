@@ -40,7 +40,17 @@ git commit -m "Remove sensitive config file"
 3. Run the parser: `python parse_trades.py` to extract data from PDFs into `trades.csv`
 
 4. Run the dashboard: `streamlit run dashboard.py`
+### Desktop Shortcuts
+Two convenient ways to launch the dashboard:
 
+**Option 1: Direct Python Shortcut** (Recommended)
+- Desktop shortcut: "Trading Dashboard.lnk"
+- Launches directly with Python virtual environment
+
+**Option 2: Batch File Shortcut**
+- Desktop shortcut: "Trading Dashboard (Batch).lnk"
+- Uses batch file with virtual environment activation
+- Alternative: Run `launch_dashboard.bat` directly
 ## Features
 
 - Summary metrics: Total trades and P&L

@@ -117,7 +117,7 @@ def extract_text_from_pdf(pdf_path):
             text += page.extract_text() + "\n"
     return text
 
-def parse_trades(text, trade_date):
+def parse_trades(text, trade_date, broker="Unknown"):
     trades = []
     lines = text.split('\n')
     in_trades_section = False
@@ -156,7 +156,8 @@ def parse_trades(text, trade_date):
                     'WAP': wap,
                     'Brokerage': brokerage,
                     'Net Price': net_price,
-                    'Net Total': net_total
+                    'Net Total': net_total,
+                    'Broker': broker
                 }
                 trades.append(trade)
         if 'Future &' in line and 'Options' in line:
@@ -192,6 +193,7 @@ def extract_funds_data(text, trade_date, broker):
                             'Broker': broker,
                             'Type': 'Deposit' if amount > 0 else 'Withdrawal',
                             'Amount': abs(amount),
+                            'Currency': 'USD' if broker == 'Exness' else 'INR',
                             'Description': 'Settlement Obligation'
                         })
                 except (ValueError, IndexError):
@@ -209,6 +211,7 @@ def extract_funds_data(text, trade_date, broker):
                             'Broker': broker,
                             'Type': 'Settlement Payable' if amount < 0 else 'Settlement Receivable',
                             'Amount': abs(amount),
+                            'Currency': 'USD' if broker == 'Exness' else 'INR',
                             'Description': 'Final Settlement Amount'
                         })
                 except (ValueError, IndexError):
@@ -307,7 +310,7 @@ def parse_new_pdfs(pdf_files):
             
             if trade_date:
                 # Extract trades
-                trades = parse_trades(text, trade_date)
+                trades = parse_trades(text, trade_date, broker)
                 new_trades.extend(trades)
                 print(f"  OK {idx+1}. {filename}: {len(trades)} trades")
                 
