@@ -29,7 +29,7 @@ git commit -m "Remove sensitive config file"
 
 ## Setup
 
-1. Install dependencies: `pip install pdfplumber pandas streamlit plotly gspread oauth2client`
+1. Install dependencies: `pip install pdfplumber pandas streamlit plotly gspread oauth2client python-dotenv`
 
 2. Configure credentials in `config.py`:
    ```python
@@ -40,7 +40,23 @@ git commit -m "Remove sensitive config file"
 3. Run the parser: `python parse_trades.py` to extract data from PDFs into `trades.csv`
 
 4. Run the dashboard: `streamlit run dashboard.py`
-### Desktop Shortcuts
+
+## Testing
+
+The project includes unit tests to ensure code reliability:
+
+- Run all tests: `python -m unittest discover`
+- Run specific test file: `python -m unittest test_pdf_parser.py`
+- Run with verbose output: `python -m unittest discover -v`
+
+Tests cover:
+- PDF text extraction
+- Trade data parsing
+- Funds and pledges extraction
+- Configuration loading
+- Date parsing and validation
+
+## Desktop Shortcuts
 Two convenient ways to launch the dashboard:
 
 **Option 1: Direct Python Shortcut** (Recommended)

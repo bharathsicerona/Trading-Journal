@@ -3,383 +3,558 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import numpy as np
 from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+import logging
+logger = logging.getLogger(__name__)
+
+# Optional click-based plotly events (streamlit-plotly-events)
+try:
+    from streamlit_plotly_events import plotly_events
+    HAVE_PLOTLY_EVENTS = True
+except Exception:
+    plotly_events = None
+    HAVE_PLOTLY_EVENTS = False
 
 # Page config
-st.set_page_config(page_title="Trading Journal Dashboard", layout="wide")
+st.set_page_config(
+    page_title="Trading Journal Dashboard",
+    layout="wide",
+    page_icon="📊",
+    initial_sidebar_state="expanded"
+)
 
-# Initialize session state for drilldown
-if 'selected_date' not in st.session_state:
-    st.session_state.selected_date = None
-if 'selected_broker' not in st.session_state:
-    st.session_state.selected_broker = None
-if 'selected_underlying' not in st.session_state:
-    st.session_state.selected_underlying = None
-if 'date_filter' not in st.session_state:
-    st.session_state.date_filter = None
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 5px solid #ff4b4b;
+    }
+    .positive {
+        border-left-color: #00cc44 !important;
+    }
+    .negative {
+        border-left-color: #ff4b4b !important;
+    }
+    .sidebar .sidebar-content {
+        background-color: #f8f9fa;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# Load data files
-trades_file = 'trades.csv'
-funds_file = 'funds_transactions.csv'
-pledges_file = 'pledges.csv'
-summary_file = 'account_summary.csv'
+# Initialize session state with better defaults
+session_state_defaults = {
+    'selected_date': None,
+    'selected_broker': None,
+    'selected_underlying': None,
+    'date_filter': None,
+    'selected_trade_type': None,
+    'selected_fund_type': None,
+    'show_advanced': False
+}
 
-# Load trades
-if os.path.exists(trades_file):
-    df_trades = pd.read_csv(trades_file)
-    df_trades['Date'] = pd.to_datetime(df_trades['Date'])
-    df_trades['Expiry'] = pd.to_datetime(df_trades['Expiry'])
-else:
-    df_trades = pd.DataFrame()
+for key, default in session_state_defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-# Load funds transactions
-if os.path.exists(funds_file):
-    df_funds = pd.read_csv(funds_file)
-    df_funds['Date'] = pd.to_datetime(df_funds['Date'])
-    # Add currency column if it doesn't exist (for backward compatibility)
-    if 'Currency' not in df_funds.columns:
-        df_funds['Currency'] = df_funds['Broker'].apply(lambda x: 'USD' if x == 'Exness' else 'INR')
-else:
-    df_funds = pd.DataFrame()
+# Sidebar for global controls
+st.sidebar.title("🎛️ Controls")
 
-# Load pledges
-if os.path.exists(pledges_file):
-    df_pledges = pd.read_csv(pledges_file)
-    df_pledges['Date'] = pd.to_datetime(df_pledges['Date'])
-else:
-    df_pledges = pd.DataFrame()
+# Theme selector
+theme = st.sidebar.selectbox("Theme", ["Light", "Dark"], index=0)
+if theme == "Dark":
+    st.markdown("""
+    <style>
+        .stApp { background-color: #0e1117; color: white; }
+        .metric-card { background-color: #262730; color: white; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# Load account summary
-if os.path.exists(summary_file):
-    df_summary = pd.read_csv(summary_file)
-    df_summary['Date'] = pd.to_datetime(df_summary['Date'])
-else:
-    df_summary = pd.DataFrame()
+# Data loading with error handling
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_data():
+    """Load all data files with proper error handling"""
+    data = {}
 
-# Title with drilldown info
-title_col1, title_col2 = st.columns([3, 1])
-with title_col1:
-    st.title('📊 Trading Journal Dashboard')
-with title_col2:
-    if st.button('🔄 Clear Filters'):
-        st.session_state.selected_date = None
-        st.session_state.selected_broker = None
-        st.session_state.selected_underlying = None
-        st.session_state.date_filter = None
-        st.rerun()
+    # File paths
+    files = {
+        'trades': 'trades.csv',
+        'funds': 'funds_transactions.csv',
+        'pledges': 'pledges.csv',
+        'summary': 'account_summary.csv'
+    }
 
-# Global filters
-st.markdown("---")
-col1, col2, col3, col4 = st.columns(4)
+    for key, filename in files.items():
+        if os.path.exists(filename):
+            try:
+                df = pd.read_csv(filename)
 
-with col1:
-    if not df_trades.empty:
-        date_range = st.date_input(
-            "Date Range",
-            value=(df_trades['Date'].min().date(), df_trades['Date'].max().date()),
-            key="date_range"
-        )
-    else:
-        date_range = None
+                # Convert date columns
+                date_columns = [col for col in df.columns if 'date' in col.lower() or col in ['Date', 'Expiry']]
+                for col in date_columns:
+                    if col in df.columns:
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
 
-with col2:
-    if not df_trades.empty:
-        # Check if Broker column exists, otherwise use Exchange or default
-        if 'Broker' in df_trades.columns and df_trades['Broker'].notna().any():
-            brokers = ['All'] + sorted(df_trades['Broker'].dropna().unique().tolist())
-            broker_label = "Broker"
+                # Data validation
+                if key == 'trades':
+                    required_cols = ['Date', 'Net Total']
+                    missing_cols = [col for col in required_cols if col not in df.columns]
+                    if missing_cols:
+                        st.error(f"Missing required columns in trades.csv: {missing_cols}")
+                        df = pd.DataFrame()
+                    else:
+                        # Add calculated columns
+                        df['Trade_Result'] = df['Net Total'].apply(lambda x: 'Win' if x > 0 else 'Loss' if x < 0 else 'Break-even')
+                        df['Abs_PnL'] = df['Net Total'].abs()
+                        df['Day_of_Week'] = df['Date'].dt.day_name()
+                        df['Month'] = df['Date'].dt.month_name()
+                        df['Year'] = df['Date'].dt.year
+
+                elif key == 'funds':
+                    if 'Currency' not in df.columns:
+                        df['Currency'] = df.get('Broker', '').apply(lambda x: 'USD' if str(x).lower() == 'exness' else 'INR')
+
+                data[key] = df
+                st.sidebar.success(f"✅ {key.title()}: {len(df)} records")
+
+            except Exception as e:
+                st.sidebar.error(f"❌ Error loading {filename}: {str(e)}")
+                data[key] = pd.DataFrame()
         else:
-            # Use Exchange as proxy for broker filtering
-            brokers = ['All'] + sorted(df_trades['Exchange'].unique().tolist())
-            broker_label = "Exchange"
-        selected_broker = st.selectbox(broker_label, brokers, key="broker_filter")
-    else:
-        selected_broker = 'All'
-        broker_label = "Broker"
+            data[key] = pd.DataFrame()
+            st.sidebar.warning(f"⚠️ {filename} not found")
 
-with col3:
-    if not df_trades.empty:
-        underlyings = ['All'] + sorted(df_trades['Underlying'].unique().tolist())
-        selected_underlying = st.selectbox("Underlying", underlyings, key="underlying_filter")
-    else:
-        selected_underlying = 'All'
+    return data
 
-with col4:
-    if not df_trades.empty:
-        pnl_filter = st.selectbox("P&L Filter", ['All', 'Profitable', 'Loss', 'Break-even'], key="pnl_filter")
-    else:
-        pnl_filter = 'All'
+# Load data
+data = load_data()
+df_trades = data.get('trades', pd.DataFrame())
+df_funds = data.get('funds', pd.DataFrame())
+df_pledges = data.get('pledges', pd.DataFrame())
+df_summary = data.get('summary', pd.DataFrame())
 
-# Apply filters to trades data
-def apply_filters(df):
+# Load processed files metadata if present
+processed_csv = os.path.join(os.getcwd(), 'processed_files.csv')
+df_processed = None
+if os.path.exists(processed_csv):
+    try:
+        df_processed = pd.read_csv(processed_csv)
+        # Ensure proper datetime
+        if 'DownloadedAt' in df_processed.columns:
+            try:
+                df_processed['DownloadedAt'] = pd.to_datetime(df_processed['DownloadedAt'], errors='coerce')
+            except Exception:
+                pass
+    except Exception as e:
+        df_processed = None
+        logger.debug(f"Could not read processed_files.csv: {e}")
+
+# Show processed files summary in the sidebar
+with st.sidebar.expander("📁 Processed Files", expanded=False):
+    if df_processed is not None and not df_processed.empty:
+        st.write(f"Total processed files: {len(df_processed)}")
+        # show counts by broker
+        if 'Broker' in df_processed.columns:
+            counts = df_processed['Broker'].value_counts().to_dict()
+            st.write("Broker counts:")
+            for b, c in counts.items():
+                st.write(f"- {b}: {c}")
+        # show a small table
+        st.dataframe(df_processed.sort_values('DownloadedAt', ascending=False).head(50))
+    else:
+        st.write("No processed_files.csv found or it's empty yet.")
+
+# Sidebar filters
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔍 Global Filters")
+
+# Date range filter
+if not df_trades.empty:
+    min_date = df_trades['Date'].min().date()
+    max_date = df_trades['Date'].max().date()
+    date_range = st.sidebar.date_input(
+        "Date Range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
+    )
+else:
+    date_range = None
+
+# Broker filter
+if not df_trades.empty and 'Broker' in df_trades.columns:
+    brokers = ['All'] + sorted(df_trades['Broker'].dropna().unique().tolist())
+    selected_broker = st.sidebar.selectbox("Broker", brokers, key="broker_filter")
+else:
+    selected_broker = 'All'
+
+# Underlying filter
+if not df_trades.empty:
+    underlyings = ['All'] + sorted(df_trades['Underlying'].unique().tolist())
+    selected_underlying = st.sidebar.selectbox("Underlying", underlyings, key="underlying_filter")
+else:
+    selected_underlying = 'All'
+
+# P&L filter
+pnl_filter = st.sidebar.selectbox("P&L Filter", ['All', 'Profitable', 'Loss', 'Break-even'], key="pnl_filter")
+
+# Advanced filters toggle
+show_advanced = st.sidebar.checkbox("Show Advanced Filters", key="show_advanced")
+if show_advanced:
+    # Trade type filter
+    if not df_trades.empty and 'Type' in df_trades.columns:
+        trade_types = ['All'] + sorted(df_trades['Type'].dropna().unique().tolist())
+        selected_trade_type = st.sidebar.selectbox("Trade Type", trade_types, key="trade_type_filter")
+    else:
+        selected_trade_type = 'All'
+
+    # Exchange filter
+    if not df_trades.empty and 'Exchange' in df_trades.columns:
+        exchanges = ['All'] + sorted(df_trades['Exchange'].dropna().unique().tolist())
+        selected_exchange = st.sidebar.selectbox("Exchange", exchanges, key="exchange_filter")
+    else:
+        selected_exchange = 'All'
+else:
+    selected_trade_type = 'All'
+    selected_exchange = 'All'
+
+# Clear filters button
+if st.sidebar.button("🗑️ Clear All Filters"):
+    for key in session_state_defaults.keys():
+        st.session_state[key] = session_state_defaults[key]
+    st.rerun()
+
+# Apply filters function with improved logic
+def apply_filters(df, data_type='trades'):
+    """Apply all filters to dataframe with better error handling"""
     if df.empty:
         return df
+
+    df_filtered = df.copy()
 
     # Date filter
     if date_range and len(date_range) == 2:
         start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-        df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
+        df_filtered = df_filtered[(df_filtered['Date'] >= start_date) & (df_filtered['Date'] <= end_date)]
 
-    # Broker/Exchange filter
-    if selected_broker != 'All':
-        if 'Broker' in df.columns and df['Broker'].notna().any():
-            df = df[df['Broker'] == selected_broker]
-        elif 'Exchange' in df.columns:
-            df = df[df['Exchange'] == selected_broker]
+    # Broker filter
+    if selected_broker != 'All' and 'Broker' in df_filtered.columns:
+        df_filtered = df_filtered[df_filtered['Broker'] == selected_broker]
 
     # Underlying filter
-    if selected_underlying != 'All':
-        df = df[df['Underlying'] == selected_underlying]
+    if selected_underlying != 'All' and 'Underlying' in df_filtered.columns:
+        df_filtered = df_filtered[df_filtered['Underlying'] == selected_underlying]
 
     # P&L filter
-    if pnl_filter == 'Profitable':
-        df = df[df['Net Total'] > 0]
-    elif pnl_filter == 'Loss':
-        df = df[df['Net Total'] < 0]
-    elif pnl_filter == 'Break-even':
-        df = df[df['Net Total'] == 0]
+    if pnl_filter != 'All' and 'Net Total' in df_filtered.columns:
+        if pnl_filter == 'Profitable':
+            df_filtered = df_filtered[df_filtered['Net Total'] > 0]
+        elif pnl_filter == 'Loss':
+            df_filtered = df_filtered[df_filtered['Net Total'] < 0]
+        elif pnl_filter == 'Break-even':
+            df_filtered = df_filtered[df_filtered['Net Total'] == 0]
 
-    return df
+    # Advanced filters
+    if show_advanced:
+        if selected_trade_type != 'All' and 'Type' in df_filtered.columns:
+            df_filtered = df_filtered[df_filtered['Type'] == selected_trade_type]
+
+        if selected_exchange != 'All' and 'Exchange' in df_filtered.columns:
+            df_filtered = df_filtered[df_filtered['Exchange'] == selected_exchange]
+
+    return df_filtered
 
 # Apply filters
-df_trades_filtered = apply_filters(df_trades)
-df_funds_filtered = df_funds[df_funds['Date'].isin(df_trades_filtered['Date'])] if not df_funds.empty else df_funds
-df_pledges_filtered = df_pledges[df_pledges['Date'].isin(df_trades_filtered['Date'])] if not df_pledges.empty else df_pledges
-df_summary_filtered = df_summary[df_summary['Date'].isin(df_trades_filtered['Date'])] if not df_summary.empty else df_summary
+df_trades_filtered = apply_filters(df_trades, 'trades')
+df_funds_filtered = apply_filters(df_funds, 'funds') if not df_funds.empty else df_funds
+df_pledges_filtered = apply_filters(df_pledges, 'pledges') if not df_pledges.empty else df_pledges
+df_summary_filtered = apply_filters(df_summary, 'summary') if not df_summary.empty else df_summary
 
-# Tab selection
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Trades", "💰 Funds Flow", "📌 Pledges", "📋 Summary", "📊 Analytics"])
+# Create Round-Trip trades dataframe for accurate win rate and PnL metrics
+# This combines a buy leg and a sell leg for the same contract on the same day
+if not df_trades_filtered.empty:
+    rt_group_cols = ['Date', 'Underlying', 'Strike', 'Type']
+    valid_cols = [c for c in rt_group_cols if c in df_trades_filtered.columns]
+    agg_dict = {'Net Total': 'sum'}
+    if 'Broker' in df_trades_filtered.columns:
+        valid_cols.append('Broker')
+    if 'Quantity' in df_trades_filtered.columns:
+        agg_dict['Quantity'] = 'max'  # Proxy to keep the column
+        
+    df_round_trips = df_trades_filtered.groupby(valid_cols, dropna=False).agg(agg_dict).reset_index()
+    if 'Date' in df_round_trips.columns:
+        df_round_trips['Day_of_Week'] = df_round_trips['Date'].dt.day_name()
+        df_round_trips['Month'] = df_round_trips['Date'].dt.month_name()
+        df_round_trips['Year'] = df_round_trips['Date'].dt.year
+else:
+    df_round_trips = pd.DataFrame()
+
+# Main dashboard title with summary
+col1, col2, col3 = st.columns([2, 1, 1])
+with col1:
+    st.title('📊 Trading Journal Dashboard')
+    # UI hint about interactivity
+    if HAVE_PLOTLY_EVENTS:
+        st.markdown("**Tip:** Click any chart element to drill down (clicks are supported). You can still use the selectboxes below charts as an alternative.")
+    else:
+        st.markdown("**Tip:** Click-based drilldowns are not available. Use the selectboxes below charts to filter and drill down.")
+with col2:
+    if not df_trades_filtered.empty:
+        total_pnl = df_trades_filtered['Net Total'].sum()
+        pnl_class = "positive" if total_pnl >= 0 else "negative"
+        st.markdown(f"""
+        <div class="metric-card {pnl_class}">
+            <h3>Total P&L</h3>
+            <h2>₹{total_pnl:,.2f}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+with col3:
+    if not df_round_trips.empty:
+        win_rate = (df_round_trips['Net Total'] > 0).mean() * 100
+        st.markdown(f"""
+        <div class="metric-card positive">
+            <h3>Win Rate</h3>
+            <h2>{win_rate:.1f}%</h2>
+        </div>
+        """, unsafe_allow_html=True)
+
+# Tab navigation with better organization
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📈 Trades", "💰 Funds Flow", "📌 Pledges",
+    "📋 Summary", "📊 Analytics", "🎯 Risk Analysis"
+])
 
 # ===== TAB 1: TRADES =====
 with tab1:
     if not df_trades_filtered.empty:
-        col1, col2, col3, col4 = st.columns(4)
+        # Key metrics row
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+
         with col1:
-            st.metric('Total Trades', len(df_trades_filtered))
+            st.metric('Total Trades', len(df_round_trips))
         with col2:
             total_pnl = df_trades_filtered['Net Total'].sum()
             st.metric('Total P&L', f'₹{total_pnl:,.2f}')
         with col3:
-            win_rate = (df_trades_filtered[df_trades_filtered['Net Total'] > 0].shape[0] / len(df_trades_filtered) * 100) if len(df_trades_filtered) > 0 else 0
+            win_rate = (df_round_trips['Net Total'] > 0).mean() * 100
             st.metric('Win Rate', f'{win_rate:.1f}%')
         with col4:
-            avg_trade = df_trades_filtered['Net Total'].mean()
+            avg_trade = df_round_trips['Net Total'].mean()
             st.metric('Avg Trade', f'₹{avg_trade:.2f}')
+        with col5:
+            largest_win = df_round_trips['Net Total'].max()
+            st.metric('Largest Win', f'₹{largest_win:,.2f}')
+        with col6:
+            largest_loss = df_round_trips['Net Total'].min()
+            st.metric('Largest Loss', f'₹{largest_loss:,.2f}')
 
-        # Drilldown section
-        if st.session_state.selected_date or st.session_state.selected_broker or st.session_state.selected_underlying:
-            st.markdown("### 🔍 Drilldown View")
-            drill_col1, drill_col2, drill_col3 = st.columns(3)
-
-            with drill_col1:
-                if st.session_state.selected_date:
-                    st.info(f"📅 **Date:** {st.session_state.selected_date.strftime('%Y-%m-%d')}")
-            with drill_col2:
-                if st.session_state.selected_broker:
-                    st.info(f"🏢 **Broker:** {st.session_state.selected_broker}")
-            with drill_col3:
-                if st.session_state.selected_underlying:
-                    st.info(f"📈 **Underlying:** {st.session_state.selected_underlying}")
-
-            # Show detailed trades for drilldown
-            drilldown_trades = df_trades_filtered.copy()
-            if st.session_state.selected_date:
-                drilldown_trades = drilldown_trades[drilldown_trades['Date'].dt.date == st.session_state.selected_date]
-            if st.session_state.selected_broker:
-                drilldown_trades = drilldown_trades[drilldown_trades['Broker'] == st.session_state.selected_broker]
-            if st.session_state.selected_underlying:
-                drilldown_trades = drilldown_trades[drilldown_trades['Underlying'] == st.session_state.selected_underlying]
-
-            if not drilldown_trades.empty:
-                st.markdown(f"**{len(drilldown_trades)} trades found**")
-                st.dataframe(drilldown_trades, width='stretch')
-            else:
-                st.warning("No trades match the drilldown criteria")
-
+        # Charts section
         st.markdown("---")
 
-        # Daily P&L with drilldown
-        st.subheader('📊 Daily P&L (Click bars for details)')
+        # Daily P&L with improved interactivity
+        st.subheader('📊 Daily P&L Performance')
         daily_pnl = df_trades_filtered.groupby('Date')['Net Total'].sum().reset_index()
         daily_pnl['Cumulative P&L'] = daily_pnl['Net Total'].cumsum()
 
-        # Create clickable bar chart
-        fig = px.bar(daily_pnl, x='Date', y='Net Total', title='Daily Profit/Loss',
-                     color='Net Total', color_continuous_scale='RdYlGn')
+        # Create interactive bar chart
+        fig_daily = px.bar(
+            daily_pnl, x='Date', y='Net Total',
+            title='Daily Profit/Loss',
+            color='Net Total',
+            color_continuous_scale='RdYlGn',
+            hover_data=['Cumulative P&L']
+        )
 
-        # Add click event handling
-        fig.update_traces(marker=dict(line=dict(width=1, color='DarkSlateGrey')))
-        clicked = st.plotly_chart(fig, width='stretch', on_select="rerun")
+        # Add reference line at zero
+        fig_daily.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.7)
 
-        # Handle bar clicks for drilldown
-        if clicked and 'selection' in clicked and clicked['selection']['points']:
-            selected_point = clicked['selection']['points'][0]
-            if 'x' in selected_point:
-                selected_date = pd.to_datetime(selected_point['x']).date()
-                st.session_state.selected_date = selected_date
-                st.rerun()
+        # Handle click events properly
+        st.plotly_chart(fig_daily, use_container_width=True)
+
+        # Explicit date selector for drilldown (safe alternative to plot selection)
+        date_options = [None] + list(daily_pnl['Date'].dt.date.unique())
+        chosen_date = st.selectbox("Select date to drill down", options=date_options, format_func=lambda d: "" if d is None else d.strftime("%Y-%m-%d"), key="daily_select")
+        if chosen_date:
+            st.session_state.selected_date = chosen_date
+
+        # Show drilldown if date selected
+        if st.session_state.selected_date:
+            st.markdown(f"### 🔍 Details for {st.session_state.selected_date.strftime('%Y-%m-%d')}")
+
+            day_trades = df_trades_filtered[df_trades_filtered['Date'].dt.date == st.session_state.selected_date]
+            day_rt = df_round_trips[df_round_trips['Date'].dt.date == st.session_state.selected_date]
+
+            if not day_trades.empty:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Day's P&L", f"₹{day_trades['Net Total'].sum():,.2f}")
+                with col2:
+                    st.metric("Trades", len(day_rt))
+                with col3:
+                    st.metric("Win Rate", f"{(day_rt['Net Total'] > 0).mean()*100:.1f}%" if not day_rt.empty else "0.0%")
+
+                st.dataframe(day_trades, use_container_width=True)
+            else:
+                st.info("No trades found for selected date")
 
         # Cumulative P&L
         st.subheader('📈 Cumulative P&L')
-        fig2 = px.line(daily_pnl, x='Date', y='Cumulative P&L', title='Cumulative Profit/Loss',
-                       markers=True)
-        st.plotly_chart(fig2, width='stretch')
+        fig_cumulative = px.line(
+            daily_pnl, x='Date', y='Cumulative P&L',
+            title='Cumulative Profit/Loss',
+            markers=True,
+            line_shape='spline'
+        )
+        fig_cumulative.add_hline(y=0, line_dash="dash", line_color="red", opacity=0.7)
+        st.plotly_chart(fig_cumulative, use_container_width=True)
 
+        # Performance by categories
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader(f'🏢 Trades by {broker_label} (Click for details)')
+            st.subheader('🏢 Performance by Broker')
             if 'Broker' in df_trades_filtered.columns and df_trades_filtered['Broker'].notna().any():
-                broker_counts = df_trades_filtered['Broker'].value_counts()
-                title_text = f'Trade Distribution by {broker_label}'
-            else:
-                broker_counts = df_trades_filtered['Exchange'].value_counts()
-                title_text = 'Trade Distribution by Exchange'
+                broker_perf = df_trades_filtered.groupby('Broker').agg({
+                    'Net Total': ['sum', 'count', 'mean'],
+                    'Quantity': 'sum'
+                }).round(2)
+                broker_perf.columns = ['Total P&L', 'Trade Count', 'Avg Trade', 'Total Quantity']
+                broker_perf = broker_perf.reset_index()
 
-            fig3 = px.pie(broker_counts, names=broker_counts.index, values=broker_counts.values,
-                         title=title_text)
+                fig_broker = px.bar(
+                    broker_perf, x='Broker', y='Total P&L',
+                    title='P&L by Broker',
+                    color='Total P&L',
+                    color_continuous_scale='RdYlGn',
+                    text='Trade Count'
+                )
+                st.plotly_chart(fig_broker, use_container_width=True)
 
-            # Add click handling for pie chart
-            clicked_pie = st.plotly_chart(fig3, width='stretch', on_select="rerun")
-
-            if clicked_pie and 'selection' in clicked_pie and clicked_pie['selection']['points']:
-                selected_point = clicked_pie['selection']['points'][0]
-                if 'label' in selected_point:
-                    st.session_state.selected_broker = selected_point['label']
-                    st.rerun()
+                # Broker details in expandable sections
+                for broker in broker_perf['Broker']:
+                    broker_data = df_trades_filtered[df_trades_filtered['Broker'] == broker]
+                    broker_rt = df_round_trips[df_round_trips['Broker'] == broker]
+                    with st.expander(f"📊 {broker} Details"):
+                        bcol1, bcol2, bcol3, bcol4 = st.columns(4)
+                        with bcol1:
+                            st.metric(f"{broker} P&L", f"₹{broker_data['Net Total'].sum():,.2f}")
+                        with bcol2:
+                            st.metric(f"Win Rate", f"{(broker_rt['Net Total'] > 0).mean()*100:.1f}%" if not broker_rt.empty else "0.0%")
+                        with bcol3:
+                            st.metric(f"Avg Trade", f"₹{broker_rt['Net Total'].mean():.2f}" if not broker_rt.empty else "₹0.00")
+                        with bcol4:
+                            st.metric(f"Trades", len(broker_rt))
 
         with col2:
-            st.subheader('📈 P&L by Underlying (Click for details)')
-            underlying_pnl = df_trades_filtered.groupby('Underlying')['Net Total'].sum().reset_index()
-            underlying_pnl = underlying_pnl.sort_values('Net Total', ascending=False)
+            st.subheader('📈 Performance by Underlying')
+            underlying_perf = df_trades_filtered.groupby('Underlying')['Net Total'].sum().reset_index()
+            underlying_perf = underlying_perf.sort_values('Net Total', ascending=False)
 
-            fig4 = px.bar(underlying_pnl, x='Underlying', y='Net Total',
-                         color='Net Total', color_continuous_scale='RdYlGn',
-                         title='Profit/Loss by Underlying')
-
-            # Add click handling for bar chart
-            clicked_bar = st.plotly_chart(fig4, width='stretch', on_select="rerun")
-
-            if clicked_bar and 'selection' in clicked_bar and clicked_bar['selection']['points']:
-                selected_point = clicked_bar['selection']['points'][0]
-                if 'x' in selected_point:
-                    st.session_state.selected_underlying = selected_point['x']
-                    st.rerun()
+            fig_underlying = px.bar(
+                underlying_perf, x='Underlying', y='Net Total',
+                title='P&L by Underlying',
+                color='Net Total',
+                color_continuous_scale='RdYlGn'
+            )
+            st.plotly_chart(fig_underlying, use_container_width=True)
 
         # Trade timing analysis
         st.subheader('⏰ Trade Timing Analysis')
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Trades by day of week
-            df_trades_filtered['Day_of_Week'] = df_trades_filtered['Date'].dt.day_name()
-            dow_pnl = df_trades_filtered.groupby('Day_of_Week')['Net Total'].agg(['sum', 'count']).reset_index()
-            dow_pnl.columns = ['Day', 'Total_PnL', 'Trade_Count']
-            dow_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-            dow_pnl['Day'] = pd.Categorical(dow_pnl['Day'], categories=dow_order, ordered=True)
-            dow_pnl = dow_pnl.sort_values('Day')
-
-            fig5 = px.bar(dow_pnl, x='Day', y='Total_PnL', color='Total_PnL',
-                         color_continuous_scale='RdYlGn', title='P&L by Day of Week')
-            st.plotly_chart(fig5, width='stretch')
-
-        with col2:
-            # Trades by time of day (if time data available)
-            if 'Time' in df_trades_filtered.columns:
-                df_trades_filtered['Hour'] = pd.to_datetime(df_trades_filtered['Time']).dt.hour
-                hourly_pnl = df_trades_filtered.groupby('Hour')['Net Total'].sum().reset_index()
-                fig6 = px.bar(hourly_pnl, x='Hour', y='Net Total', title='P&L by Hour of Day')
-                st.plotly_chart(fig6, width='stretch')
-            else:
-                st.info("Time data not available for hourly analysis")
-
-        # Broker-specific analysis
-        if 'Broker' in df_trades_filtered.columns and df_trades_filtered['Broker'].notna().any():
-            st.markdown("---")
-            st.subheader("🏢 Broker Performance Comparison")
-
-            broker_summary = df_trades_filtered.groupby('Broker').agg({
-                'Net Total': ['sum', 'count', 'mean'],
-                'Quantity': 'sum'
-            }).round(2)
-
-            broker_summary.columns = ['Total P&L', 'Trade Count', 'Avg Trade', 'Total Quantity']
-            broker_summary = broker_summary.reset_index()
-
-            # Display broker comparison table
-            st.dataframe(broker_summary, use_container_width=True)
-
-            # Broker P&L comparison chart
-            fig_broker = px.bar(broker_summary, x='Broker', y='Total P&L',
-                              title='P&L by Broker', color='Total P&L',
-                              color_continuous_scale='RdYlGn')
-            st.plotly_chart(fig_broker, width='stretch')
-
-            # Individual broker details in expandable sections
-            for broker in df_trades_filtered['Broker'].unique():
-                broker_data = df_trades_filtered[df_trades_filtered['Broker'] == broker]
-
-                with st.expander(f"📊 {broker} Details ({len(broker_data)} trades)"):
-                    col1, col2, col3, col4 = st.columns(4)
-
-                    with col1:
-                        st.metric(f"{broker} Total P&L", f"₹{broker_data['Net Total'].sum():,.2f}")
-                    with col2:
-                        st.metric(f"{broker} Win Rate", f"{(broker_data['Net Total'] > 0).mean()*100:.1f}%")
-                    with col3:
-                        st.metric(f"{broker} Avg Trade", f"₹{broker_data['Net Total'].mean():.2f}")
-                    with col4:
-                        st.metric(f"{broker} Total Trades", len(broker_data))
-
-                    # Broker-specific charts
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        # Daily P&L for this broker
-                        daily_broker = broker_data.groupby('Date')['Net Total'].sum().reset_index()
-                        fig_daily = px.bar(daily_broker, x='Date', y='Net Total',
-                                         title=f'{broker} Daily P&L')
-                        st.plotly_chart(fig_daily, width='stretch')
-
-                    with col2:
-                        # Underlying performance for this broker
-                        underlying_broker = broker_data.groupby('Underlying')['Net Total'].sum().reset_index()
-                        underlying_broker = underlying_broker.sort_values('Net Total', ascending=False)
-                        fig_under = px.bar(underlying_broker, x='Underlying', y='Net Total',
-                                         title=f'{broker} by Underlying')
-                        st.plotly_chart(fig_under, width='stretch')
-        st.subheader('📋 All Trades')
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            # Available sort columns (excluding date/time columns)
-            sort_options = [col for col in df_trades_filtered.columns if col not in ['Date', 'Expiry'] and df_trades_filtered[col].dtype in ['int64', 'float64', 'object']]
-            sort_by = st.selectbox("Sort by", sort_options, key="sort_trades")
-        with col2:
-            sort_order = st.selectbox("Order", ['Descending', 'Ascending'], key="sort_order")
-        with col3:
-            # Safe default columns that exist
-            safe_defaults = []
-            available_columns = df_trades_filtered.columns.tolist()
-            preferred_columns = ['Date', 'Underlying', 'Type', 'Quantity', 'WAP', 'Net Total', 'Exchange']
-            for col in preferred_columns:
-                if col in available_columns:
-                    safe_defaults.append(col)
+            # Day of week analysis
+            dow_perf = df_round_trips.groupby('Day_of_Week').agg({
+                'Net Total': ['sum', 'count', 'mean']
+            }).round(2)
+            dow_perf.columns = ['Total P&L', 'Trade Count', 'Avg Trade']
+            dow_perf = dow_perf.reset_index()
 
-            show_columns = st.multiselect("Show columns",
-                                        available_columns,
-                                        default=safe_defaults,
-                                        key="show_columns")
+            # Reorder days
+            day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            dow_perf['Day_of_Week'] = pd.Categorical(dow_perf['Day_of_Week'], categories=day_order, ordered=True)
+            dow_perf = dow_perf.sort_values('Day_of_Week')
+
+            fig_dow = px.bar(
+                dow_perf, x='Day_of_Week', y='Total P&L',
+                title='P&L by Day of Week',
+                color='Total P&L',
+                color_continuous_scale='RdYlGn'
+            )
+            st.plotly_chart(fig_dow, use_container_width=True)
+
+        with col2:
+            # Monthly analysis
+            monthly_perf = df_round_trips.groupby('Month')['Net Total'].sum().reset_index()
+            month_order = ['January', 'February', 'March', 'April', 'May', 'June',
+                          'July', 'August', 'September', 'October', 'November', 'December']
+            monthly_perf['Month'] = pd.Categorical(monthly_perf['Month'], categories=month_order, ordered=True)
+            monthly_perf = monthly_perf.sort_values('Month')
+
+            fig_monthly = px.bar(
+                monthly_perf, x='Month', y='Net Total',
+                title='P&L by Month',
+                color='Net Total',
+                color_continuous_scale='RdYlGn'
+            )
+            st.plotly_chart(fig_monthly, use_container_width=True)
+
+        with col3:
+            # Trade type analysis
+            if 'Type' in df_round_trips.columns:
+                type_perf = df_round_trips.groupby('Type').agg({
+                    'Net Total': ['sum', 'count', 'mean']
+                }).round(2)
+                type_perf.columns = ['Total P&L', 'Trade Count', 'Avg Trade']
+                type_perf = type_perf.reset_index()
+                type_perf = type_perf.sort_values('Total P&L', ascending=False)
+
+                fig_type = px.bar(
+                    type_perf, x='Type', y='Total P&L',
+                    title='P&L by Trade Type',
+                    color='Total P&L',
+                    color_continuous_scale='RdYlGn'
+                )
+                st.plotly_chart(fig_type, use_container_width=True)
+
+        # Detailed trades table with sorting
+        st.subheader('📋 Detailed Trades')
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            sort_options = [col for col in df_trades_filtered.columns
+                          if col not in ['Date', 'Expiry'] and
+                          df_trades_filtered[col].dtype in ['int64', 'float64', 'object']]
+            sort_by = st.selectbox("Sort by", sort_options, key="sort_trades")
+
+        with col2:
+            sort_order = st.selectbox("Order", ['Descending', 'Ascending'], key="sort_order_trades")
+
+        with col3:
+            available_columns = df_trades_filtered.columns.tolist()
+            default_columns = ['Date', 'Underlying', 'Type', 'Quantity', 'Net Total', 'Exchange']
+            safe_defaults = [col for col in default_columns if col in available_columns]
+            show_columns = st.multiselect(
+                "Show columns",
+                available_columns,
+                default=safe_defaults,
+                key="show_columns_trades"
+            )
 
         # Apply sorting
         ascending = sort_order == 'Ascending'
         sorted_trades = df_trades_filtered.sort_values(sort_by, ascending=ascending)
 
-        # Show selected columns
+        # Display table
         if show_columns:
-            st.dataframe(sorted_trades[show_columns], width='stretch')
+            st.dataframe(sorted_trades[show_columns], use_container_width=True)
         else:
-            st.dataframe(sorted_trades, width='stretch')
+            st.dataframe(sorted_trades, use_container_width=True)
 
     else:
         st.info("No trades data available or no data matches current filters")
@@ -401,9 +576,6 @@ with tab2:
         with col4:
             avg_transaction = df_funds_filtered['Amount'].mean()
             st.metric('Avg Transaction', f"{currency} {avg_transaction:.2f}")
-        with col4:
-            avg_transaction = df_funds_filtered['Amount'].mean()
-            st.metric('Avg Transaction', f'₹{avg_transaction:.2f}')
 
         # Funds Flow by Type with drilldown
         st.subheader('💰 Funds Flow by Type (Click segments for details)')
@@ -413,16 +585,15 @@ with tab2:
                      title='Fund Transactions by Type')
 
         # Add click handling for pie chart
-        clicked_pie_funds = st.plotly_chart(fig, width='stretch', on_select="rerun")
+        st.plotly_chart(fig, width='stretch')
 
-        if clicked_pie_funds and 'selection' in clicked_pie_funds and clicked_pie_funds['selection']['points']:
-            selected_point = clicked_pie_funds['selection']['points'][0]
-            if 'label' in selected_point:
-                # Filter funds by selected type
-                selected_type = selected_point['label']
-                type_funds = df_funds_filtered[df_funds_filtered['Type'] == selected_type]
-                st.markdown(f"### 📋 {selected_type} Transactions")
-                st.dataframe(type_funds.sort_values('Date', ascending=False), width='stretch')
+        # Provide explicit type selector for pie drilldown
+        fund_type_options = ['All'] + funds_by_type['Type'].tolist()
+        selected_fund_type = st.selectbox("Select fund type", options=fund_type_options, key="fund_pie_select")
+        if selected_fund_type != 'All':
+            type_funds = df_funds_filtered[df_funds_filtered['Type'] == selected_fund_type]
+            st.markdown(f"### 📋 {selected_fund_type} Transactions")
+            st.dataframe(type_funds.sort_values('Date', ascending=False), width='stretch')
 
         # Daily Funds Flow with drilldown
         st.subheader('📅 Daily Funds Flow (Click bars for details)')
@@ -432,17 +603,21 @@ with tab2:
                       color_discrete_map={'Deposit': '#90EE90', 'Withdrawal': '#FF6B6B', 'Settlement Payable': '#FFB347'})
 
         # Add click handling for bar chart
-        clicked_bar_funds = st.plotly_chart(fig2, width='stretch', on_select="rerun")
+        st.plotly_chart(fig2, width='stretch')
 
-        if clicked_bar_funds and 'selection' in clicked_bar_funds and clicked_bar_funds['selection']['points']:
-            selected_point = clicked_bar_funds['selection']['points'][0]
-            if 'x' in selected_point and 'legendgroup' in selected_point:
-                selected_date = pd.to_datetime(selected_point['x']).date()
-                selected_type = selected_point['legendgroup']
-                day_funds = df_funds_filtered[(df_funds_filtered['Date'].dt.date == selected_date) &
-                                            (df_funds_filtered['Type'] == selected_type)]
-                st.markdown(f"### 📋 {selected_type} on {selected_date}")
-                st.dataframe(day_funds, width='stretch')
+        # Provide selectors for date and type to drilldown
+        date_options = [None] + sorted(daily_funds['Date'].dt.date.unique().tolist())
+        selected_bar_date = st.selectbox("Select date", options=date_options, format_func=lambda d: "" if d is None else d.strftime("%Y-%m-%d"), key="fund_bar_date")
+        type_options = ['All'] + sorted(daily_funds['Type'].unique().tolist())
+        selected_bar_type = st.selectbox("Select type", options=type_options, key="fund_bar_type")
+        if selected_bar_date and selected_bar_type:
+            if selected_bar_type != 'All':
+                day_funds = df_funds_filtered[(df_funds_filtered['Date'].dt.date == selected_bar_date) &
+                                            (df_funds_filtered['Type'] == selected_bar_type)]
+            else:
+                day_funds = df_funds_filtered[df_funds_filtered['Date'].dt.date == selected_bar_date]
+            st.markdown(f"### 📋 {selected_bar_type} on {selected_bar_date}" if selected_bar_type != 'All' else f"### 📋 Funds on {selected_bar_date}")
+            st.dataframe(day_funds, width='stretch')
 
         # Funds by Broker with drilldown
         if 'Broker' in df_funds_filtered.columns and df_funds_filtered['Broker'].notna().any():
@@ -451,13 +626,30 @@ with tab2:
             fig3 = px.bar(broker_funds, x='Broker', y='Amount', title='Total Funds by Broker',
                          color='Amount', color_continuous_scale='Blues')
 
-            # Add click handling for broker bar chart
-            clicked_broker_funds = st.plotly_chart(fig3, width='stretch', on_select="rerun")
+            if HAVE_PLOTLY_EVENTS:
+                sel = plotly_events(fig3, click_event=True, key="broker_funds_events")
+                if sel:
+                    broker_name = sel[0].get('x')
+                    broker_detail = df_funds_filtered[df_funds_filtered['Broker'] == broker_name]
+                    broker_currency = broker_detail['Currency'].iloc[0] if not broker_detail.empty else 'INR'
+                    st.markdown(f"### 📋 {broker_name} Fund Transactions ({broker_currency})")
+                    st.dataframe(broker_detail.sort_values('Date', ascending=False), width='stretch')
 
-            if clicked_broker_funds and 'selection' in clicked_broker_funds and clicked_broker_funds['selection']['points']:
-                selected_point = clicked_broker_funds['selection']['points'][0]
-                if 'x' in selected_point:
-                    selected_broker_funds = selected_point['x']
+                # Fallback selector as well
+                broker_options = ['All'] + broker_funds['Broker'].tolist()
+                selected_broker_funds = st.selectbox("Select broker", options=broker_options, key="broker_funds_select")
+                if selected_broker_funds != 'All':
+                    broker_detail = df_funds_filtered[df_funds_filtered['Broker'] == selected_broker_funds]
+                    broker_currency = broker_detail['Currency'].iloc[0] if not broker_detail.empty else 'INR'
+                    st.markdown(f"### 📋 {selected_broker_funds} Fund Transactions ({broker_currency})")
+                    st.dataframe(broker_detail.sort_values('Date', ascending=False), width='stretch')
+            else:
+                st.plotly_chart(fig3, width='stretch')
+
+                # Provide broker selector for drilldown
+                broker_options = ['All'] + broker_funds['Broker'].tolist()
+                selected_broker_funds = st.selectbox("Select broker", options=broker_options, key="broker_funds_select")
+                if selected_broker_funds != 'All':
                     broker_detail = df_funds_filtered[df_funds_filtered['Broker'] == selected_broker_funds]
                     broker_currency = broker_detail['Currency'].iloc[0] if not broker_detail.empty else 'INR'
                     st.markdown(f"### 📋 {selected_broker_funds} Fund Transactions ({broker_currency})")
@@ -482,8 +674,7 @@ with tab2:
                 merged.columns = ['Date', 'Trading_PnL', 'Funds_Flow']
 
                 fig4 = px.scatter(merged, x='Trading_PnL', y='Funds_Flow',
-                                title='Trading P&L vs Funds Flow Correlation',
-                                trendline="ols")
+                                title='Trading P&L vs Funds Flow Correlation')
                 st.plotly_chart(fig4, width='stretch')
 
             with col2:
@@ -584,18 +775,17 @@ with tab5:
         # Performance Overview
         col1, col2, col3, col4 = st.columns(4)
 
-        total_trades = len(df_trades_filtered)
-        winning_trades = df_trades_filtered[df_trades_filtered['Net Total'] > 0]
-        losing_trades = df_trades_filtered[df_trades_filtered['Net Total'] < 0]
-        breakeven_trades = df_trades_filtered[df_trades_filtered['Net Total'] == 0]
+        total_trades = len(df_round_trips)
+        winning_trades = df_round_trips[df_round_trips['Net Total'] > 0]
+        losing_trades = df_round_trips[df_round_trips['Net Total'] < 0]
 
         with col1:
             st.metric('Total Trades', total_trades)
         with col2:
-            win_rate = len(winning_trades) / total_trades * 100
+            win_rate = (len(winning_trades) / total_trades * 100) if total_trades > 0 else 0
             st.metric('Win Rate', f'{win_rate:.1f}%')
         with col3:
-            profit_factor = abs(winning_trades['Net Total'].sum() / losing_trades['Net Total'].sum()) if len(losing_trades) > 0 else float('inf')
+            profit_factor = abs(winning_trades['Net Total'].sum() / losing_trades['Net Total'].sum()) if len(losing_trades) > 0 and losing_trades['Net Total'].sum() != 0 else float('inf')
             st.metric('Profit Factor', f'{profit_factor:.2f}')
         with col4:
             avg_win = winning_trades['Net Total'].mean() if len(winning_trades) > 0 else 0
@@ -609,7 +799,7 @@ with tab5:
 
         with col1:
             # Win/Loss Distribution
-            trade_results = ['Win' if x > 0 else 'Loss' if x < 0 else 'Break-even' for x in df_trades_filtered['Net Total']]
+            trade_results = ['Win' if x > 0 else 'Loss' if x < 0 else 'Break-even' for x in df_round_trips['Net Total']]
             result_counts = pd.Series(trade_results).value_counts()
 
             fig1 = px.pie(result_counts, names=result_counts.index, values=result_counts.values,
@@ -619,8 +809,8 @@ with tab5:
 
         with col2:
             # P&L Distribution Histogram
-            fig2 = px.histogram(df_trades_filtered, x='Net Total', nbins=50,
-                              title='P&L Distribution',
+            fig2 = px.histogram(df_round_trips, x='Net Total', nbins=50,
+                              title='P&L Distribution (Round-Trip Trades)',
                               color_discrete_sequence=['#636EFA'])
             fig2.add_vline(x=0, line_dash="dash", line_color="red")
             st.plotly_chart(fig2, width='stretch')
@@ -642,9 +832,8 @@ with tab5:
 
         with col2:
             # Weekly Performance
-            df_trades_filtered['Week'] = df_trades_filtered['Date'].dt.to_period('W').astype(str)
+            df_trades_filtered['Week'] = df_trades_filtered['Date'].dt.to_period('W').apply(lambda r: r.start_time)
             weekly_perf = df_trades_filtered.groupby('Week')['Net Total'].sum().reset_index()
-            weekly_perf['Week'] = pd.to_datetime(weekly_perf['Week'])
 
             fig4 = px.line(weekly_perf, x='Week', y='Net Total',
                           title='Weekly Performance', markers=True)
@@ -669,8 +858,8 @@ with tab5:
 
         with col1:
             # Trade Type Analysis
-            if 'Type' in df_trades_filtered.columns:
-                type_perf = df_trades_filtered.groupby('Type')['Net Total'].agg(['sum', 'count', 'mean']).reset_index()
+            if 'Type' in df_round_trips.columns:
+                type_perf = df_round_trips.groupby('Type')['Net Total'].agg(['sum', 'count', 'mean']).reset_index()
                 type_perf.columns = ['Type', 'Total_PnL', 'Count', 'Avg_PnL']
 
                 fig5 = px.bar(type_perf, x='Type', y='Total_PnL',
@@ -748,12 +937,13 @@ with tab5:
             insights.append("📊 High volatility in daily performance. Consider position sizing.")
 
         # Best performing underlying
+        underlying_pnl = df_trades_filtered.groupby('Underlying')['Net Total'].sum().reset_index()
         if not underlying_pnl.empty:
             best_underlying = underlying_pnl.loc[underlying_pnl['Net Total'].idxmax()]
             insights.append(f"🏆 Best performing underlying: {best_underlying['Underlying']} (₹{best_underlying['Net Total']:,.2f})")
 
         # Trading frequency
-        avg_trades_per_day = len(df_trades_filtered) / len(df_trades_filtered['Date'].dt.date.unique())
+        avg_trades_per_day = len(df_round_trips) / len(df_trades_filtered['Date'].dt.date.unique())
         if avg_trades_per_day > 10:
             insights.append("⚡ High trading frequency. Consider reducing to improve quality.")
         elif avg_trades_per_day < 2:
@@ -764,3 +954,184 @@ with tab5:
 
     else:
         st.info("No trades data available for analytics")
+
+# ===== TAB 6: RISK ANALYSIS =====
+with tab6:
+    st.subheader('🎯 Risk Management Analysis')
+
+    if not df_trades_filtered.empty:
+        # Risk Metrics
+        col1, col2, col3, col4 = st.columns(4)
+
+        # Calculate risk metrics based on round-trip returns
+        df_rt_sorted = df_round_trips.sort_values('Date').copy()
+        returns = df_rt_sorted['Net Total']
+        cumulative_returns = returns.cumsum()
+
+        # Maximum drawdown
+        peak = cumulative_returns.expanding().max()
+        drawdown = cumulative_returns - peak
+        max_drawdown = drawdown.min()
+        max_drawdown_pct = (max_drawdown / peak.max()) * 100 if peak.max() > 0 else 0
+
+        # Value at Risk (95% confidence)
+        var_95 = np.percentile(returns, 5)
+
+        # Expected Shortfall (CVaR)
+        cvar_95 = returns[returns <= var_95].mean() if len(returns[returns <= var_95]) > 0 else 0
+
+        # Calmar Ratio
+        unique_days = len(df_trades_filtered['Date'].dt.date.unique())
+        last_return = cumulative_returns.iloc[-1] if not cumulative_returns.empty else 0
+        annual_return = (last_return / unique_days * 365) if unique_days > 0 else 0
+        calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0
+
+        with col1:
+            st.metric('Max Drawdown', f'₹{max_drawdown:,.2f}')
+        with col2:
+            st.metric('Max Drawdown %', f'{max_drawdown_pct:.2f}%')
+        with col3:
+            st.metric('VaR (95%)', f'₹{var_95:,.2f}')
+        with col4:
+            st.metric('CVaR (95%)', f'₹{cvar_95:,.2f}')
+
+        st.markdown("---")
+
+        # Drawdown Analysis
+        st.subheader('📉 Drawdown Analysis')
+
+        # Create drawdown chart
+        drawdown_df = pd.DataFrame({
+            'Date': df_rt_sorted['Date'],
+            'Cumulative_PnL': cumulative_returns,
+            'Drawdown': drawdown,
+            'Drawdown_Pct': (drawdown / peak) * 100
+        })
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            fig_drawdown = px.line(
+                drawdown_df, x='Date', y='Drawdown',
+                title='Portfolio Drawdown Over Time',
+                color_discrete_sequence=['red']
+            )
+            fig_drawdown.add_hline(y=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig_drawdown, use_container_width=True)
+
+        with col2:
+            fig_drawdown_pct = px.area(
+                drawdown_df, x='Date', y='Drawdown_Pct',
+                title='Drawdown Percentage',
+                color_discrete_sequence=['orange']
+            )
+            st.plotly_chart(fig_drawdown_pct, use_container_width=True)
+
+        # Risk-Adjusted Returns
+        st.subheader('📊 Risk-Adjusted Performance')
+
+        # Calculate rolling Sharpe ratio
+        if len(returns) > 10:
+            rolling_sharpe = returns.rolling(window=10).mean() / returns.rolling(window=10).std() * np.sqrt(252)
+            rolling_sharpe_df = pd.DataFrame({
+                'Date': df_rt_sorted['Date'],
+                'Rolling_Sharpe': rolling_sharpe
+            })
+
+            fig_rolling_sharpe = px.line(
+                rolling_sharpe_df, x='Date', y='Rolling_Sharpe',
+                title='10-Trade Rolling Sharpe Ratio'
+            )
+            fig_rolling_sharpe.add_hline(y=0, line_dash="dash", line_color="red")
+            st.plotly_chart(fig_rolling_sharpe, use_container_width=True)
+
+        # Position Sizing Analysis
+        st.subheader('📏 Position Sizing Analysis')
+
+        kelly_fraction = None
+        if 'Quantity' in df_round_trips.columns:
+            # Kelly Criterion approximation
+            win_rate = (returns > 0).mean()
+            avg_win = returns[returns > 0].mean()
+            avg_loss = abs(returns[returns < 0].mean())
+
+            if avg_loss > 0:
+                kelly_fraction = win_rate - ((1 - win_rate) / (avg_win / avg_loss))
+                optimal_position_size = kelly_fraction * 100  # as percentage
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric('Kelly Fraction', f'{kelly_fraction:.3f}')
+                with col2:
+                    st.metric('Optimal Position Size', f'{max(0, optimal_position_size):.1f}%')
+                with col3:
+                    st.metric('Current Avg Position', f"{df_round_trips['Quantity'].mean():.0f}")
+
+                # Position size distribution
+                fig_position = px.histogram(
+                    df_round_trips, x='Quantity',
+                    title='Position Size Distribution',
+                    nbins=20
+                )
+                st.plotly_chart(fig_position, use_container_width=True)
+
+        # Risk Management Recommendations
+        st.subheader('🛡️ Risk Management Recommendations')
+
+        recommendations = []
+
+        if max_drawdown_pct > 20:
+            recommendations.append("⚠️ **High drawdown detected.** Consider reducing position sizes or implementing trailing stops.")
+
+        if abs(var_95) > abs(returns.mean()) * 2:
+            recommendations.append("⚠️ **High Value at Risk.** Daily losses can be significant - consider diversification.")
+
+        if calmar_ratio < 1:
+            recommendations.append("⚠️ **Poor risk-adjusted returns.** Focus on reducing drawdowns relative to returns.")
+
+        if kelly_fraction is not None and kelly_fraction < 0.1:
+            recommendations.append("💡 **Conservative Kelly fraction.** Consider smaller position sizes for capital preservation.")
+
+        if len(recommendations) == 0:
+            recommendations.append("✅ **Risk management looks good.** Continue monitoring and maintaining current practices.")
+
+        for rec in recommendations:
+            st.info(rec)
+
+        # Stress Testing
+        st.subheader('🔥 Stress Testing Scenarios')
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            # Worst case scenario (5 worst days)
+            daily_perf = df_trades_filtered.groupby(df_trades_filtered['Date'].dt.date)['Net Total'].sum().reset_index()
+            worst_5_days = daily_perf.nsmallest(5, 'Net Total')['Net Total'].sum()
+            st.metric('5 Worst Days Loss', f'₹{worst_5_days:,.2f}')
+
+        with col2:
+            # 10% worst trades
+            worst_10pct_trades = int(len(returns) * 0.1)
+            if worst_10pct_trades > 0:
+                worst_10pct_loss = returns.nsmallest(worst_10pct_trades).sum()
+                st.metric('10% Worst Trades Loss', f'₹{worst_10pct_loss:,.2f}')
+
+        with col3:
+            # Recovery time estimation
+            if max_drawdown < 0:
+                recovery_trades = 0
+                cumulative = 0
+                for pnl in reversed(returns):
+                    cumulative += pnl
+                    recovery_trades += 1
+                    if cumulative >= abs(max_drawdown):
+                        break
+                st.metric('Est. Recovery Trades', recovery_trades)
+
+    else:
+        st.info("No trades data available for risk analysis")
+
+# Footer
+st.markdown("---")
+st.markdown("*Dashboard last updated: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "*")

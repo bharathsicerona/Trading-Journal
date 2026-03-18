@@ -1,84 +1,74 @@
-import pdfplumber
-import pandas as pd
 import os
 import re
+import logging
 from datetime import datetime
+import pandas as pd
+from dotenv import load_dotenv
 
-def extract_text_from_pdf(pdf_path):
-    with pdfplumber.open(pdf_path) as pdf:
-        text = ""
-        for page in pdf.pages:
-            text += page.extract_text() + "\n"
-    return text
+load_dotenv()
 
-def parse_trades(text, trade_date):
-    trades = []
-    lines = text.split('\n')
-    in_trades_section = False
-    for line in lines:
-        line = line.strip()
-        if 'Buy(B)/Sell(S)' in line:
-            in_trades_section = True
-            continue
-        if in_trades_section and line.startswith(('NSE', 'BSE')):
-            parts = line.split()
-            if len(parts) >= 13:
-                exchange = parts[0]
-                underlying = parts[1]
-                strike = parts[2]
-                option_type = parts[3]
-                expiry_str = ' '.join(parts[4:7])
-                try:
-                    expiry = datetime.strptime(expiry_str, '%d %b %Y').date()
-                except:
-                    continue
-                bs = parts[7]
-                qty = int(parts[8])
-                wap = float(parts[9])
-                brokerage = float(parts[10])
-                net_price = float(parts[11])
-                net_total = float(parts[12])
-                trade = {
-                    'Date': trade_date,
-                    'Exchange': exchange,
-                    'Underlying': underlying,
-                    'Strike': float(strike),
-                    'Type': option_type,
-                    'Expiry': expiry,
-                    'Buy/Sell': bs,
-                    'Quantity': qty,
-                    'WAP': wap,
-                    'Brokerage': brokerage,
-                    'Net Price': net_price,
-                    'Net Total': net_total
-                }
-                trades.append(trade)
-        if 'Future &' in line and 'Options' in line:  # End of section
-            in_trades_section = False
-    return trades
+try:
+    import config
+except ImportError:
+    config = None
 
-def extract_trade_date(text):
-    match = re.search(r'Trade Date (\d{2}-\d{2}-\d{4})', text)
-    if match:
-        return datetime.strptime(match.group(1), '%d-%m-%Y').date()
-    return None
+# Reuse pdf parsing helpers
+from pdf_parser import (
+    extract_text_from_pdf, parse_trades as robust_parse_trades, extract_trade_date
+)
 
-def process_all_pdfs(directory):
+logger = logging.getLogger(__name__)
+
+
+def process_all_pdfs(directory: str) -> pd.DataFrame:
+    """Process all contract PDFs in a directory and write trades.csv"""
     all_trades = []
+    processed_files = set()
     for file in os.listdir(directory):
-        if file.endswith('.pdf') and 'Contract_Note' in file:
+        lower_file = file.lower()
+        if file.endswith('.pdf') and ('contract_note' in lower_file or 'comm_contract' in lower_file):
+            base_file = re.sub(r'_\d{10,}\.pdf$', '.pdf', file)
+            if base_file in processed_files:
+                logger.info(f"Skipping duplicate file: {file}")
+                continue
+            processed_files.add(base_file)
+
             pdf_path = os.path.join(directory, file)
-            text = extract_text_from_pdf(pdf_path)
-            trade_date = extract_trade_date(text)
-            if trade_date:
-                trades = parse_trades(text, trade_date)
-                all_trades.extend(trades)
+            try:
+                base_filename = file.split('__')[-1] if '__' in file else file
+                if '__' in file:
+                    broker = file.split('__')[0].replace('_', ' ')
+                else:
+                    broker = "Unknown"
+                    if "mstock" in base_filename.lower() or "comm_contract" in base_filename.lower():
+                        broker = "mStock"
+                    elif "groww" in base_filename.lower() or "contract_note" in base_filename.lower() or "contract note" in base_filename.lower():
+                        broker = "Groww"
+
+                pdf_password = None
+                if broker in ["Groww", "mStock"]:
+                    pdf_password = os.getenv("BROKER_PDF_PASSWORD")
+                    if not pdf_password and config and hasattr(config, 'BROKER_PDF_PASSWORD'):
+                        pdf_password = config.BROKER_PDF_PASSWORD
+                
+                text = extract_text_from_pdf(pdf_path, password=pdf_password)
+                trade_date = extract_trade_date(text)
+                if trade_date:
+                    trades = robust_parse_trades(text, trade_date, broker=broker)
+                    all_trades.extend(trades)
+                else:
+                    logger.warning(f"Could not extract date from {file}")
+            except Exception as e:
+                logger.exception(f"Error processing {file}: {str(e)}")
+
     df = pd.DataFrame(all_trades)
     df.to_csv('trades.csv', index=False)
     return df
 
+
 if __name__ == "__main__":
-    directory = '.'
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+    directory = 'pdfs' if os.path.exists('pdfs') else '.'
     df = process_all_pdfs(directory)
-    print(f"Extracted {len(df)} trades")
-    print(df.head())
+    logger.info(f"Extracted {len(df)} trades")
+    logger.info("\n" + str(df.head()))

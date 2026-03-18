@@ -18,6 +18,9 @@ var/
 wheels/
 *.egg-info/
 .installed.cfg
+
+# Environment variables
+.env
 *.egg
 
 # Virtual environments

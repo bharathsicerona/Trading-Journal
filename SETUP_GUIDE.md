@@ -55,10 +55,10 @@ This creates a scheduled task that runs every working day (Mon-Fri) at 8:00 AM.
 
 ```powershell
 # Fetch and parse PDFs
-c:.venv\Scripts\python.exe fetch_and_parse_gmail.py
+.\.venv\Scripts\python.exe fetch_and_parse_gmail.py
 
 # Launch dashboard
-c:.venv\Scripts\python.exe -m streamlit run dashboard.py
+.\.venv\Scripts\python.exe -m streamlit run dashboard.py
 ```
 
 ## File Structure
