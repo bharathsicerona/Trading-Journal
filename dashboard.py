@@ -278,7 +278,7 @@ df_summary_filtered = apply_filters(df_summary, 'summary') if not df_summary.emp
 # Create Round-Trip trades dataframe for accurate win rate and PnL metrics
 # This combines a buy leg and a sell leg for the same contract on the same day
 if not df_trades_filtered.empty:
-    rt_group_cols = ['Date', 'Underlying', 'Strike', 'Type']
+    rt_group_cols = ['Date', 'Underlying', 'Strike', 'Type', 'Expiry']
     valid_cols = [c for c in rt_group_cols if c in df_trades_filtered.columns]
     agg_dict = {'Net Total': 'sum'}
     if 'Broker' in df_trades_filtered.columns:

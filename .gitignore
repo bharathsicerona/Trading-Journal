@@ -64,3 +64,7 @@ secrets.json
 
 # PowerShell scripts (may contain sensitive info)
 *.ps1
+
+# Allow checked-in project task runner scripts
+!task.bat
+!tasks.ps1

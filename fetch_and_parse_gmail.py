@@ -74,9 +74,30 @@ account_summary_csv = os.path.join(trading_dir, "account_summary.csv")
 logger.info(f"Saving PDFs to: {pdf_folder}")
 logger.info("Data files: trades.csv, funds_transactions.csv, pledges.csv, account_summary.csv")
 
+
+def _require_gmail_credentials() -> None:
+    """Fail fast when Gmail credentials are not configured."""
+    if not EMAIL_ACCOUNT or not APP_PASSWORD:
+        raise ValueError(
+            "Missing Gmail credentials. Set EMAIL_ACCOUNT and APP_PASSWORD in your environment or .env file."
+        )
+
+
+def _append_unique_csv_row(csv_path: str, row: dict, subset: List[str]) -> None:
+    """Append a single row to a CSV while preserving uniqueness on the given subset."""
+    row_df = pd.DataFrame([row])
+    if os.path.exists(csv_path):
+        existing = pd.read_csv(csv_path)
+        combined = pd.concat([existing, row_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=subset, keep='first')
+    else:
+        combined = row_df
+    combined.to_csv(csv_path, index=False)
+
 # ===== GMAIL DOWNLOAD FUNCTIONS =====
 def download_pdfs_from_gmail(max_retries: int = 3, retry_delay: int = 5, days_back: int = 30, max_emails: int = None, since_date: str = None, before_date: str = None) -> List[str]:
     """Download PDFs from Gmail for specified senders with retry logic"""
+    _require_gmail_credentials()
     downloaded_files: List[str] = []
     senders = EMAIL_SENDERS
     if max_emails is None:
@@ -216,12 +237,7 @@ def download_pdfs_from_gmail(max_retries: int = 3, retry_delay: int = 5, days_ba
                                                 processed_csv = os.path.join(trading_dir, 'processed_files.csv')
                                                 try:
                                                     row = {'Filename': os.path.basename(tagged_path), 'Broker': broker_detected, 'Source': sender, 'DownloadedAt': datetime.now().isoformat(), 'SizeKB': round(file_size,1)}
-                                                    if os.path.exists(processed_csv):
-                                                        dfp = pd.read_csv(processed_csv)
-                                                        dfp = pd.concat([dfp, pd.DataFrame([row])], ignore_index=True)
-                                                    else:
-                                                        dfp = pd.DataFrame([row])
-                                                    dfp.to_csv(processed_csv, index=False)
+                                                    _append_unique_csv_row(processed_csv, row, subset=['Filename'])
                                                 except Exception as e:
                                                     logger.debug(f"Could not write processed_files.csv: {e}")
 
@@ -262,8 +278,8 @@ def parse_new_pdfs(pdf_files: List[str]):
     """Parse newly downloaded PDFs and extract all data"""
     if not pdf_files:
         logger.info("\nNo new PDFs to parse")
-        # But still process existing PDFs if no new ones
-        pdf_paths = [os.path.join(pdf_folder, f) for f in os.listdir(pdf_folder) if f.endswith('.pdf') and 'contract' in f.lower()]
+        # Re-scan all existing PDFs, including statement PDFs that contribute funds/pledges/summary data.
+        pdf_paths = [os.path.join(pdf_folder, f) for f in os.listdir(pdf_folder) if f.endswith('.pdf')]
         if not pdf_paths:
             return
         logger.info(f"Processing {len(pdf_paths)} existing PDFs...")
@@ -378,6 +394,7 @@ def parse_new_pdfs(pdf_files: List[str]):
             df_existing = pd.read_csv(pledges_csv)
             df_new = pd.DataFrame(all_pledges)
             df = pd.concat([df_existing, df_new], ignore_index=True)
+            df = df.drop_duplicates(subset=['Date', 'Broker', 'Amount', 'Description'], keep='first')
         else:
             df = pd.DataFrame(all_pledges)
         df.to_csv(pledges_csv, index=False)
@@ -394,6 +411,7 @@ def parse_new_pdfs(pdf_files: List[str]):
             df_existing = pd.read_csv(account_summary_csv)
             df_new = pd.DataFrame(all_summaries)
             df = pd.concat([df_existing, df_new], ignore_index=True)
+            df = df.drop_duplicates(subset=['Filename'], keep='first')
         else:
             df = pd.DataFrame(all_summaries)
         df.to_csv(account_summary_csv, index=False)

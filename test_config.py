@@ -41,5 +41,35 @@ class TestConfig(unittest.TestCase):
         self.assertIsNone(config.EMAIL_ACCOUNT)
         self.assertIsNone(config.APP_PASSWORD)
 
+    @patch('config.load_dotenv')
+    @patch.dict(os.environ, {
+        'EMAIL_ACCOUNT': 'test@example.com',
+        'APP_PASSWORD': 'testpassword123'
+    })
+    def test_has_required_gmail_config(self, mock_load_dotenv):
+        """Test positive config validation helper"""
+        import importlib
+        import config
+        importlib.reload(config)
+
+        self.assertTrue(config.has_required_gmail_config())
+        self.assertEqual(config.get_missing_required_env_vars(), [])
+
+    @patch('config.os.getenv')
+    @patch('config.load_dotenv')
+    def test_missing_required_env_vars_helper(self, mock_load_dotenv, mock_getenv):
+        """Test missing env var helper"""
+        mock_getenv.return_value = None
+
+        import importlib
+        import config
+        importlib.reload(config)
+
+        self.assertFalse(config.has_required_gmail_config())
+        self.assertEqual(
+            config.get_missing_required_env_vars(),
+            ['EMAIL_ACCOUNT', 'APP_PASSWORD']
+        )
+
 if __name__ == '__main__':
     unittest.main()

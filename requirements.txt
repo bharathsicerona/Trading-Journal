@@ -1,0 +1,7 @@
+pdfplumber
+pandas
+streamlit
+plotly
+numpy
+python-dotenv
+streamlit-plotly-events
